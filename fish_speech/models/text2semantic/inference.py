@@ -254,9 +254,10 @@ def decode_one_token_ar(
     semantic_ids: list,
     previous_tokens: torch.Tensor = None,
     batched=False,
+    key_padding_mask=None,
     **sampling_kwargs,
 ) -> torch.Tensor:
-    x = model.forward_generate(x, input_pos)
+    x = model.forward_generate(x, input_pos, key_padding_mask=key_padding_mask)
 
     sampling_kwargs_main = sampling_kwargs.copy()
     # sampling_kwargs_main["temperature"] = 0.1
@@ -547,6 +548,7 @@ def generate_batched(
     prompt: torch.Tensor,
     max_new_tokens: int,
     decode_one_token=decode_one_token_naive,
+    prompt_mask=None,
     **sampling_kwargs,
 ) -> torch.Tensor:
     """
@@ -588,6 +590,7 @@ def generate_batched(
         input_pos,
         semantic_ids=semantic_ids,
         batched=True,
+        key_padding_mask=prompt_mask,
         **sampling_kwargs,
     )
     seq[:, :, T : T + 1] = next_token
@@ -1021,7 +1024,7 @@ def generate_long(
         yield GenerateResponse(action="next")
 
 
-def generate_batch(
+def batch_inference(
     *,
     model,
     device: str | torch.device,
@@ -1053,10 +1056,10 @@ def generate_batch(
     tokenizer = model.tokenizer
     im_end_id = tokenizer.get_token_id("<|im_end|>")
 
+    segs = []
     encodeds = []
     encoded_prompts_ = []
     for idx, t in enumerate(text):
-        encoded = []
         encoded_prompts = [
             Conversation(
                 messages=[
@@ -1084,23 +1087,31 @@ def generate_batch(
                     num_codebooks=model.config.num_codebooks,
                 )
                 )
+            torch.cat(encoded_prompts, dim=1)
+            encoded_prompts = torch.cat(encoded_prompts, dim=1)
         tokens = encode_tokens(
                 tokenizer,
                 string=t,
                 device=device,
                 num_codebooks=model.config.num_codebooks,
             )
-        encoded.append(tokens)
+        encoded = [tokens]
         logger.info(f"Encoded text: {t}")
         encodeds.extend(encoded)
-        encoded_prompts_.append(torch.cat(encoded_prompts, dim=1))
+        encoded_prompts_.append(encoded_prompts)
+
+        segs.append(torch.cat([encoded_prompts, tokens], dim=1))
+
     encoded, encoded_mask = collate(
         encodeds, end_of_text=tokenizer.get_token_id("<|end_of_text|>")
     )
     encoded_prompts, encoded_prompts_mask = collate(
         encoded_prompts_, end_of_text=tokenizer.get_token_id("<|end_of_text|>")
     )
-    logger.info(f"Encoded text batch of shape {list(encoded.shape)}, and prompt batch {list(encoded_prompts.shape)}")
+    segs, segs_mask = collate(
+        segs, end_of_text=tokenizer.get_token_id("<|end_of_text|>"), pad_right=False
+    )
+    logger.info(f"Encoded text batch of shape {list(encoded.shape)}, and prompt batch {list(encoded_prompts.shape)}, mask {segs_mask.shape}")
     encoded = [encoded]
     encoded_prompts = [encoded_prompts]
     # Move temperature, top_p, repetition_penalty to device
@@ -1114,90 +1125,67 @@ def generate_batch(
     for sample_idx in range(num_samples):
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-
-        global_encoded = []
         seg_idx = 0
 
         # for each text
-        while seg_idx < len(encoded):
+        # while seg_idx < len(encoded):
+        logger.info(
+            f"Generating sentence {seg_idx + 1}/{len(encoded)} of sample {sample_idx + 1}/{num_samples}"
+        )
+
+        # seg = encoded[seg_idx]
+        cat_encoded = segs
+        # add prompt
+        # if use_prompt:
+        #     partial_encoded = encoded_prompts + partial_encoded
+
+        # cat_encoded = torch.cat(partial_encoded, dim=2)
+        prompt_length = cat_encoded.size(2)
+
+        t0 = time.perf_counter()
+        y = generate_batched(
+            model=model,
+            prompt=cat_encoded,
+            prompt_mask=segs_mask,
+            max_new_tokens=max_new_tokens,
+            decode_one_token=decode_one_token,  # decode_one_token_ar
+            temperature=temperature,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+        )
+
+        if sample_idx == 0 and seg_idx == 0 and compile:
+            logger.info(f"Compilation time: {time.perf_counter() - t0:.2f} seconds")
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        t = time.perf_counter() - t0
+
+        tokens_generated = y.size(2) - prompt_length
+        tokens_sec = tokens_generated / t
+        logger.info(
+            f"Generated {tokens_generated} tokens in {t:.02f} seconds, {tokens_sec:.02f} tokens/sec"
+        )
+        logger.info(
+            f"Bandwidth achieved: {model_size * tokens_sec / 1e9:.02f} GB/s"
+        )
+
+        if torch.cuda.is_available():
             logger.info(
-                f"Generating sentence {seg_idx + 1}/{len(encoded)} of sample {sample_idx + 1}/{num_samples}"
+                f"GPU Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB"
             )
 
-            seg = encoded[seg_idx]
-            global_encoded.append(seg)
+        # Put the generated tokens
+        # since there is <im_end>, we remove last token
+        codes = y[:, 1:, prompt_length + 1 :].clone()
+        assert (codes >= 0).all(), f"Negative code found: {codes}"
 
-            lengths = reversed([seg.size(2) for seg in global_encoded])
+        decoded = y[:, :, prompt_length:].clone()
+        # But for global encoding, we should keep the <im_end> token
 
-            # Pick last 2000 tokens
-            count = 0
-            for i, length in enumerate(lengths):
-                count += length
-                if count + length > max_length - 1024 - sum(
-                    t.shape[2] for t in encoded_prompts
-                ):
-                    break
-
-            if i != 0 and i % 2 == 0:
-                i -= 1
-
-            # Rotate the list, always make sure first segment is included to avoid drift
-            if i < len(global_encoded) - 2:
-                partial_encoded = global_encoded[:2] + global_encoded[-i:]
-            else:
-                partial_encoded = global_encoded
-
-            # add prompt
-            if use_prompt:
-                partial_encoded = encoded_prompts + partial_encoded
-
-            cat_encoded = torch.cat(partial_encoded, dim=2)
-            prompt_length = cat_encoded.size(2)
-
-            t0 = time.perf_counter()
-            y = generate_batched(
-                model=model,
-                prompt=cat_encoded,
-                max_new_tokens=max_new_tokens,
-                decode_one_token=decode_one_token,  # decode_one_token_ar
-                temperature=temperature,
-                top_p=top_p,
-                repetition_penalty=repetition_penalty,
-            )
-
-            if sample_idx == 0 and seg_idx == 0 and compile:
-                logger.info(f"Compilation time: {time.perf_counter() - t0:.2f} seconds")
-
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-
-            t = time.perf_counter() - t0
-
-            tokens_generated = y.size(2) - prompt_length
-            tokens_sec = tokens_generated / t
-            logger.info(
-                f"Generated {tokens_generated} tokens in {t:.02f} seconds, {tokens_sec:.02f} tokens/sec"
-            )
-            logger.info(
-                f"Bandwidth achieved: {model_size * tokens_sec / 1e9:.02f} GB/s"
-            )
-
-            if torch.cuda.is_available():
-                logger.info(
-                    f"GPU Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB"
-                )
-
-            # Put the generated tokens
-            # since there is <im_end>, we remove last token
-            codes = y[:, 1:, prompt_length + 1 :].clone()
-            assert (codes >= 0).all(), f"Negative code found: {codes}"
-
-            decoded = y[:, :, prompt_length:].clone()
-            # But for global encoding, we should keep the <im_end> token
-
-            global_encoded.append(decoded)
-            yield GenerateResponse(action="sample", codes=codes, text=text[seg_idx])
-            seg_idx += 1
+        yield GenerateResponse(action="sample", codes=codes, text=text[seg_idx])
+        seg_idx += 1
 
         # This indicates the end of the current sample
         yield GenerateResponse(action="next")

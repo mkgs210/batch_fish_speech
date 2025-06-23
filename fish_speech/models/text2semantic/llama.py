@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import einops
 import torch
 import torch.nn as nn
 from einops import rearrange
@@ -317,6 +318,7 @@ class BaseTransformer(nn.Module):
         inp: Tensor,
         input_pos: Optional[Tensor] = None,
         return_all: bool = False,
+        key_padding_mask: Optional[Tensor]  = None # [B, S]
     ) -> BaseTransformerForwardResult:
         x = self.embed(
             inp, share_codebook_embeddings=self.config.share_codebook_embeddings
@@ -329,6 +331,14 @@ class BaseTransformer(nn.Module):
             max_seq_len = self.max_seq_len
 
         mask = self.causal_mask[None, None, input_pos, :max_seq_len]  # (B, N, Q, K)
+        if key_padding_mask is not None:
+            bs, length = key_padding_mask.shape
+
+            atten_mask = rearrange(key_padding_mask, "b s -> b 1 1 s")
+            atten_mask = atten_mask.logical_not()
+            mask = einops.repeat(mask, "1 1 q k -> b 1 q k", b=bs).clone()
+            mask[:, :, :, :length] = mask[:, :, :, :length] & atten_mask
+
         freqs_cis = self.freqs_cis[input_pos]
 
         for layer in self.layers:
@@ -685,8 +695,9 @@ class DualARTransformer(BaseTransformer):
         x: Tensor,
         input_pos: Optional[Tensor] = None,
         vq_masks: Optional[Tensor] = None,
+        key_padding_mask: Optional[Tensor]  = None
     ) -> TransformerForwardResult:
-        x = super().forward_generate(x, input_pos, vq_masks)
+        x = super().forward_generate(x, input_pos, vq_masks, key_padding_mask=key_padding_mask) # TODO: don't pass vq_masks as return_all
         x.hidden_states = self.fast_project_in(x.hidden_states)
         return x
 
