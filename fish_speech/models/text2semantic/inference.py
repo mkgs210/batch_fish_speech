@@ -24,7 +24,7 @@ from fish_speech.conversation import (
     VQPart,
 )
 from fish_speech.models.text2semantic.llama import BaseModelArgs
-from fish_speech.models.text2semantic.utils import collate 
+from fish_speech.models.text2semantic.utils import collate
 from fish_speech.text import clean_text, split_text
 from fish_speech.tokenizer import IM_END_TOKEN, FishTokenizer
 
@@ -1086,15 +1086,15 @@ def batch_inference(
                     prompt_tokens=prompt_tokens[idx],
                     num_codebooks=model.config.num_codebooks,
                 )
-                )
+            )
             torch.cat(encoded_prompts, dim=1)
             encoded_prompts = torch.cat(encoded_prompts, dim=1)
         tokens = encode_tokens(
-                tokenizer,
-                string=t,
-                device=device,
-                num_codebooks=model.config.num_codebooks,
-            )
+            tokenizer,
+            string=t,
+            device=device,
+            num_codebooks=model.config.num_codebooks,
+        )
         encoded = [tokens]
         logger.info(f"Encoded text: {t}")
         encodeds.extend(encoded)
@@ -1111,7 +1111,9 @@ def batch_inference(
     segs, segs_mask = collate(
         segs, end_of_text=tokenizer.get_token_id("<|end_of_text|>"), pad_right=False
     )
-    logger.info(f"Encoded text batch of shape {list(encoded.shape)}, and prompt batch {list(encoded_prompts.shape)}, mask {segs_mask.shape}")
+    logger.info(
+        f"Encoded text batch of shape {list(encoded.shape)}, and prompt batch {list(encoded_prompts.shape)}, mask {segs_mask.shape}"
+    )
     encoded = [encoded]
     encoded_prompts = [encoded_prompts]
     # Move temperature, top_p, repetition_penalty to device
