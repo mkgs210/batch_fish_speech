@@ -801,8 +801,8 @@ class Attention(nn.Module):
                 dropout_p=self.dropout if self.training else 0.0,
             )
 
-        y = y.transpose(1, 2).contiguous().view(bsz, seqlen, self.dim)
-
+        y = y.transpose(1, 2).contiguous().view(bsz, seqlen, self.dim) #y = y.contiguous().view(bsz, seqlen, self.dim) не работает
+        
         return self.wo(y)
 
     def eq_scaled_dot_product_attention(

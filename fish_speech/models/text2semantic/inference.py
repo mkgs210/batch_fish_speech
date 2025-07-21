@@ -311,7 +311,7 @@ def decode_one_token_ar(
         hidden_states = model.fast_embeddings(a)
         codebooks.append(a)
 
-    codebooks = torch.stack(codebooks, dim=1 if batched else 0)
+    codebooks = torch.stack(codebooks, dim=1 if batched else 0).clone()
     # semantic_ids_tensor = torch.tensor(semantic_ids, device=codebooks.device)
     # codebooks[1:, :] = torch.masked_fill(
     #     codebooks[1:, :], ~torch.isin(codebooks[:1, :], semantic_ids_tensor), CODEBOOK_PAD_TOKEN_ID
@@ -394,7 +394,7 @@ def decode_n_tokens(
                 previous_tokens=window,
                 semantic_ids=semantic_ids,
                 **sampling_kwargs,
-            )
+            ).clone()
 
         input_pos += 1
         cur_token = next_token.view(1, model.config.num_codebooks + 1, -1)
@@ -450,7 +450,7 @@ def decode_n_tokens_batched(
                 semantic_ids=semantic_ids,
                 batched=True,
                 **sampling_kwargs,
-            )
+            ).clone()
 
         input_pos += 1
         cur_token = next_token.view(batch_size, model.config.num_codebooks + 1, -1)
@@ -547,7 +547,7 @@ def generate_batched(
     model: NaiveTransformer,
     prompt: torch.Tensor,
     max_new_tokens: int,
-    decode_one_token=decode_one_token_naive,
+    decode_one_token=decode_one_token_naive, # снаружи придёт уже нужная версия
     prompt_mask=None,
     **sampling_kwargs,
 ) -> torch.Tensor:
@@ -581,16 +581,24 @@ def generate_batched(
     seq[:, :, :T] = prompt
     input_pos = torch.arange(0, T, device=device)
 
-    # Use non-accelerated version for now, to avoid compilation overhead
-    prefill_decode = decode_one_token_ar
+    # ---------- NEW ----------
+    # в Dual‑AR мы всегда вызываем ar‑вариант; в остальных – бросаем ошибку,
+    # т.к. наивный трансформер пока не умеет батч.
+    if isinstance(model, DualARTransformer):
+        prefill_decode = decode_one_token          # уже decode_one_token_ar
+        prefill_extra  = {"batched": True, "key_padding_mask": prompt_mask}
+    else:
+        raise RuntimeError(
+            "generate_batched currently supports only DualARTransformer"
+        )
+    # ---------- /NEW ----------
 
     next_token = prefill_decode(
         model,
         prompt.view(bs, codebook_dim, -1),
         input_pos,
         semantic_ids=semantic_ids,
-        batched=True,
-        key_padding_mask=prompt_mask,
+        **prefill_extra,
         **sampling_kwargs,
     )
     seq[:, :, T : T + 1] = next_token
@@ -601,7 +609,7 @@ def generate_batched(
         next_token.view(bs, codebook_dim, -1),
         input_pos,
         max_new_tokens - 1,
-        decode_one_token=decode_one_token,
+        decode_one_token=decode_one_token,  # compiled ar‑вариант
         semantic_ids=semantic_ids,
         **sampling_kwargs,
     )
@@ -651,7 +659,7 @@ def decode_n_tokens_agent(
                 previous_tokens=window,
                 semantic_ids=semantic_ids,
                 **sampling_kwargs,
-            )
+            ).clone()
 
         input_pos += 1
         cur_token = next_token.view(batch_size, model.config.num_codebooks + 1, -1)
@@ -1060,7 +1068,7 @@ def batch_inference(
     encodeds = []
     encoded_prompts_ = []
     for idx, t in enumerate(text):
-        encoded_prompts = [
+        prompt_stack = [
             Conversation(
                 messages=[
                     Message(
@@ -1078,7 +1086,7 @@ def batch_inference(
         ]
 
         if use_prompt:
-            encoded_prompts.append(
+            prompt_stack.append(
                 encode_tokens(
                     tokenizer,
                     string=prompt_text[idx],
@@ -1087,20 +1095,22 @@ def batch_inference(
                     num_codebooks=model.config.num_codebooks,
                 )
             )
-            torch.cat(encoded_prompts, dim=1)
-            encoded_prompts = torch.cat(encoded_prompts, dim=1)
+        # ---------- NEW ----------
+        # объединяем все system / voice‑prompt сегменты в ОДИН тензор
+        encoded_prompt_tensor = torch.cat(prompt_stack, dim=1)
+        encoded_prompts_.append(encoded_prompt_tensor)
+        # ---------- /NEW ----------
         tokens = encode_tokens(
             tokenizer,
             string=t,
             device=device,
             num_codebooks=model.config.num_codebooks,
         )
-        encoded = [tokens]
         logger.info(f"Encoded text: {t}")
-        encodeds.extend(encoded)
-        encoded_prompts_.append(encoded_prompts)
+        encodeds.extend([tokens])
 
-        segs.append(torch.cat([encoded_prompts, tokens], dim=1))
+        # segs формируем из prompt + самого текста
+        segs.append(torch.cat([encoded_prompt_tensor, tokens], dim=1))  # CHANGED
 
     encoded, encoded_mask = collate(
         encodeds, end_of_text=tokenizer.get_token_id("<|end_of_text|>")
@@ -1114,8 +1124,8 @@ def batch_inference(
     logger.info(
         f"Encoded text batch of shape {list(encoded.shape)}, and prompt batch {list(encoded_prompts.shape)}, mask {segs_mask.shape}"
     )
-    encoded = [encoded]
-    encoded_prompts = [encoded_prompts]
+    # CHANGED: переменные encoded* далее не используются – просто убираем
+    
     # Move temperature, top_p, repetition_penalty to device
     # This is important so that changing params doesn't trigger recompile
     temperature = torch.tensor(temperature, device=device, dtype=torch.float)
@@ -1127,13 +1137,8 @@ def batch_inference(
     for sample_idx in range(num_samples):
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-        seg_idx = 0
-
-        # for each text
-        # while seg_idx < len(encoded):
-        logger.info(
-            f"Generating sentence {seg_idx + 1}/{len(encoded)} of sample {sample_idx + 1}/{num_samples}"
-        )
+        logger.info(f"Generating batch of {len(text)} sentences, sample "
+                    f"{sample_idx + 1}/{num_samples}")
 
         # seg = encoded[seg_idx]
         cat_encoded = segs
@@ -1156,7 +1161,7 @@ def batch_inference(
             repetition_penalty=repetition_penalty,
         )
 
-        if sample_idx == 0 and seg_idx == 0 and compile:
+        if sample_idx == 0 and compile:
             logger.info(f"Compilation time: {time.perf_counter() - t0:.2f} seconds")
 
         if torch.cuda.is_available():
@@ -1180,17 +1185,23 @@ def batch_inference(
 
         # Put the generated tokens
         # since there is <im_end>, we remove last token
-        codes = y[:, 1:, prompt_length + 1 :].clone()
+        codes = y[:, 1:, prompt_length + 1 :].clone()  # shape: (bs, C, T)
         assert (codes >= 0).all(), f"Negative code found: {codes}"
 
         decoded = y[:, :, prompt_length:].clone()
         # But for global encoding, we should keep the <im_end> token
 
-        yield GenerateResponse(action="sample", codes=codes, text=text[seg_idx])
-        seg_idx += 1
+        # ---------- NEW ----------
+        for i, single_text in enumerate(text):
+            yield GenerateResponse(
+                action="sample",
+                codes=codes[i],             # (C, T) для конкретного запроса
+                text=single_text,
+            )
+        # ---------- /NEW ----------
 
         # This indicates the end of the current sample
-        yield GenerateResponse(action="next")
+        yield GenerateResponse(action="next") # конец батча
 
 
 @dataclass
