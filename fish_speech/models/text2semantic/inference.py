@@ -28,6 +28,8 @@ from fish_speech.models.text2semantic.utils import collate
 from fish_speech.text import clean_text, split_text
 from fish_speech.tokenizer import IM_END_TOKEN, FishTokenizer
 
+from torch.compiler import cudagraph_mark_step_begin
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 torch._inductor.config.coordinate_descent_tuning = True
 torch._inductor.config.triton.unique_kernel_names = True
@@ -311,13 +313,7 @@ def decode_one_token_ar(
         hidden_states = model.fast_embeddings(a)
         codebooks.append(a)
 
-    codebooks = torch.stack(codebooks, dim=1 if batched else 0).clone()
-    # semantic_ids_tensor = torch.tensor(semantic_ids, device=codebooks.device)
-    # codebooks[1:, :] = torch.masked_fill(
-    #     codebooks[1:, :], ~torch.isin(codebooks[:1, :], semantic_ids_tensor), CODEBOOK_PAD_TOKEN_ID
-    # )
-
-    # print(codebooks)
+    codebooks = torch.stack(codebooks, dim=1 if batched else 0)
     return codebooks
 
 
@@ -353,7 +349,7 @@ def decode_one_token_naive(
                 **sampling_kwargs,
             )[0]
         )
-
+    
     return torch.stack(codebooks, dim=0)
 
 
@@ -439,6 +435,8 @@ def decode_n_tokens_batched(
         else:
             window = previous_tokens[:, :, i - win_size : i]
 
+        
+        
         with (
             torch.backends.cuda.sdp_kernel(
                 enable_flash=False, enable_mem_efficient=False, enable_math=True
@@ -446,6 +444,8 @@ def decode_n_tokens_batched(
             if torch.cuda.is_available()
             else nullcontext()
         ): # Actually better for Inductor to codegen attention here
+            if torch.cuda.is_available() and torch.compiler.is_compiling():
+                cudagraph_mark_step_begin()
             next_token = decode_one_token(
                 model=model,
                 x=cur_token,
@@ -609,7 +609,8 @@ def generate_batched(
             "generate_batched currently supports only DualARTransformer"
         )
     # ---------- /NEW ----------
-
+    if torch.cuda.is_available() and torch.compiler.is_compiling():
+        cudagraph_mark_step_begin()
     next_token = prefill_decode(
         model,
         prompt.view(bs, codebook_dim, -1),
@@ -617,7 +618,7 @@ def generate_batched(
         semantic_ids=semantic_ids,
         **prefill_extra,
         **sampling_kwargs,
-    )
+    ).clone()
     seq[:, :, T : T + 1] = next_token
 
     input_pos = torch.tensor([T], device=device, dtype=torch.int)
@@ -859,6 +860,7 @@ def load_model(checkpoint_path, device, precision, compile=False, is_agent=False
         decode_one_token = torch.compile(
             decode_one_token,
             fullgraph=True,
+            dynamic=False,
             backend="inductor" if torch.cuda.is_available() else "aot_eager",
             mode="reduce-overhead" if torch.cuda.is_available() else None,
         )

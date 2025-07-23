@@ -82,7 +82,7 @@ if compile:
         model=model,
         device=device,
         decode_one_token=decode_one_token,
-        text=["Привет!"]*len(text),
+        text=["Это текст для cold start, который будет использоваться для компиляции модели."]*len(text),
         num_samples=num_samples,
         max_new_tokens=max_new_tokens,
         top_p=top_p,
