@@ -8,9 +8,6 @@ from loguru import logger
 from pathlib import Path
 import soundfile as sf
 
-import warnings
-warnings.filterwarnings('ignore', category=FutureWarning)
-
 text = [
     "Что? Он никогда не работал? А я вот всегда работаю просто охуенно! Тоже мне нашёлся, лентяй!",
     "Никогда бы о таком не подумал раньше. Эта новость меня просто шокировала! Нет ну ты можешь себе представить?"

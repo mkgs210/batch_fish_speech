@@ -26,6 +26,7 @@ from fish_speech.conversation import (
 from fish_speech.models.text2semantic.llama import BaseModelArgs
 from fish_speech.models.text2semantic.utils import collate
 from fish_speech.text import clean_text, split_text
+from fish_speech.text.spliter import split_text
 from fish_speech.tokenizer import IM_END_TOKEN, FishTokenizer
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -311,7 +312,8 @@ def decode_one_token_ar(
         hidden_states = model.fast_embeddings(a)
         codebooks.append(a)
 
-    codebooks = torch.stack(codebooks, dim=1 if batched else 0).clone()
+    # ВАЖНО: clone() убран отсюда, теперь вызывается снаружи (см. generate_batched и decode_n_tokens_batched)
+    codebooks = torch.stack(codebooks, dim=1 if batched else 0)
     # semantic_ids_tensor = torch.tensor(semantic_ids, device=codebooks.device)
     # codebooks[1:, :] = torch.masked_fill(
     #     codebooks[1:, :], ~torch.isin(codebooks[:1, :], semantic_ids_tensor), CODEBOOK_PAD_TOKEN_ID
@@ -423,13 +425,9 @@ def decode_n_tokens_batched(
         dtype=torch.int,
         device=cur_token.device,
     )
-
     im_end_id = model.tokenizer.get_token_id(IM_END_TOKEN)
     finished = torch.zeros(batch_size, dtype=torch.bool, device=cur_token.device)
     finished = finished | (cur_token[:, 0, -1] == im_end_id)
-    
-    # НОВОЕ: сохраняем последние валидные токены для завершённых элементов
-    final_tokens = cur_token.clone()
 
     for i in tqdm(range(num_new_tokens)):
         # We need to get windowed repeat penalty
@@ -445,7 +443,7 @@ def decode_n_tokens_batched(
             )
             if torch.cuda.is_available()
             else nullcontext()
-        ): # Actually better for Inductor to codegen attention here
+        ):  # Actually better for Inductor to codegen attention here
             next_token = decode_one_token(
                 model=model,
                 x=cur_token,
@@ -457,29 +455,16 @@ def decode_n_tokens_batched(
             ).clone()
 
         input_pos += 1
-        
-        # НОВОЕ: маскируем токены для уже завершённых элементов
-        # Для завершённых элементов копируем последний валидный токен
-        for j in range(batch_size):
-            if finished[j]:
-                next_token[j] = final_tokens[j]  # Не обновляем токены для завершённых
-            else:
-                final_tokens[j] = next_token[j]  # Сохраняем последний валидный токен
-        
         cur_token = next_token.view(batch_size, model.config.num_codebooks + 1, -1)
         previous_tokens[:, :, i : i + 1] = next_token.view(
             batch_size, model.config.num_codebooks + 1, -1
         )
 
-        # Обновляем статус завершения только для ещё не завершённых элементов
-        new_finished = (cur_token[:, 0, -1] == im_end_id)
-        finished = finished | new_finished
-        
+        finished = finished | (cur_token[:, 0, -1] == im_end_id)
         if finished.all():
             break
 
     return previous_tokens[:, :, : i + 1]
-
 
 
 @torch.no_grad()
@@ -537,7 +522,7 @@ def generate(
         input_pos,
         semantic_ids=semantic_ids,
         **sampling_kwargs,
-    )
+    ).clone()
     seq[:, T : T + 1] = next_token
 
     input_pos = torch.tensor([T], device=device, dtype=torch.int)
@@ -617,7 +602,7 @@ def generate_batched(
         semantic_ids=semantic_ids,
         **prefill_extra,
         **sampling_kwargs,
-    )
+    ).clone()
     seq[:, :, T : T + 1] = next_token
 
     input_pos = torch.tensor([T], device=device, dtype=torch.int)
@@ -858,7 +843,8 @@ def load_model(checkpoint_path, device, precision, compile=False, is_agent=False
         logger.info("Compiling function...")
         decode_one_token = torch.compile(
             decode_one_token,
-            fullgraph=True,
+            fullgraph=False,
+            dynamic=True,
             backend="inductor" if torch.cuda.is_available() else "aot_eager",
             mode="reduce-overhead" if torch.cuda.is_available() else None,
         )
@@ -1131,10 +1117,6 @@ def batch_inference(
         # segs формируем из prompt + самого текста
         segs.append(torch.cat([encoded_prompt_tensor, tokens], dim=1))  # CHANGED
 
-    original_text_lengths = []
-    for encoded in encodeds:
-        original_text_lengths.append(encoded.shape[1])  # длина текста без padding
-    
     encoded, encoded_mask = collate(
         encodeds, end_of_text=tokenizer.get_token_id("<|end_of_text|>")
     )
@@ -1157,7 +1139,6 @@ def batch_inference(
         repetition_penalty, device=device, dtype=torch.float
     )
 
-    # We rely on compiled decode_one_token only (same as single inference); leave generate_batched in eager mode to keep tqdm working.
     for sample_idx in range(num_samples):
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -1209,29 +1190,23 @@ def batch_inference(
 
         # Put the generated tokens
         # since there is <im_end>, we remove last token
-        codes = y[:, 1:, prompt_length + 1 :].clone()
-        im_end_id = tokenizer.get_token_id("<|im_end|>")
+        codes = y[:, 1:, prompt_length + 1 :].clone()  # shape: (bs, C, T)
+        assert (codes >= 0).all(), f"Negative code found: {codes}"
 
+        decoded = y[:, :, prompt_length:].clone()
+        # But for global encoding, we should keep the <im_end> token
+
+        # ---------- NEW ----------
         for i, single_text in enumerate(text):
-            # Ищем позицию токена окончания в сгенерированной части
-            generated_tokens = y[i, 0, prompt_length + 1:]  # токены без промпта
-            
-            # Находим первое вхождение im_end_id
-            end_positions = (generated_tokens == im_end_id).nonzero(as_tuple=True)
-            
-            if len(end_positions[0]) > 0:
-                # Обрезаем до первого токена окончания (не включая его)
-                end_pos = end_positions[0][0].item()
-                trimmed_codes = codes[i, :, :end_pos]
-            else:
-                # Если токен окончания не найден, используем всю длину
-                trimmed_codes = codes[i]
-            
             yield GenerateResponse(
                 action="sample",
-                codes=trimmed_codes,
+                codes=codes[i],             # (C, T) для конкретного запроса
                 text=single_text,
             )
+        # ---------- /NEW ----------
+
+        # This indicates the end of the current sample
+        yield GenerateResponse(action="next") # конец батча
 
 
 @dataclass
@@ -1509,78 +1484,61 @@ def batch_generate_long(
     chunk_ptrs = [0 for _ in text]  # указатель на текущий чанк для каждого текста
     finished = [False for _ in text]
 
-    for sample_idx in range(num_samples):
-        # пока есть непросмотренные чанки — генерируем и стримим их
-        while True:
-            # Собираем батч из непросмотренных чанков
-            batch_texts = []
-            batch_prompt_texts = []
-            batch_prompt_tokens = []
-            batch_indices = []
-            batch_chunk_indices = []
-            
-            for i, (chunks, ptr, done) in enumerate(zip(all_chunks, chunk_ptrs, finished)):
-                if not done and ptr < len(chunks):
-                    batch_texts.append(chunks[ptr])
-                    batch_prompt_texts.append(prompt_texts[i])
-                    batch_prompt_tokens.append(prompt_tokens_list[i])
-                    batch_indices.append(i)
-                    batch_chunk_indices.append(ptr)
-            
-            if not batch_texts:
-                break  # Все чанки обработаны
-            
-            # ИСПРАВЛЕНИЕ: Дополняем батч до фиксированного размера
-            target_batch_size = len(text)  # Оригинальный размер
-            while len(batch_texts) < target_batch_size:
-                # Дублируем последний элемент
-                batch_texts.append(batch_texts[-1])
-                batch_prompt_texts.append(batch_prompt_texts[-1])
-                batch_prompt_tokens.append(batch_prompt_tokens[-1])
-                batch_indices.append(-1)  # Маркер для игнорирования
-                batch_chunk_indices.append(-1)
-            
-            # Генерируем текущий батч
-            responses = batch_inference(
-                model=model,
-                device=device,
-                decode_one_token=decode_one_token,
-                text=batch_texts,
-                num_samples=1,
-                max_new_tokens=max_new_tokens,
-                top_p=top_p,
-                repetition_penalty=repetition_penalty,
-                temperature=temperature,
-                compile=compile,
-                prompt_text=batch_prompt_texts,
-                prompt_tokens=batch_prompt_tokens,
-            )
-            
-            # Обрабатываем ответы
-            response_counter = 0
-            for resp in responses:
-                if resp.action == "sample":
-                    idx = batch_indices[response_counter]
-                    chk = batch_chunk_indices[response_counter]
-                    
-                    yield GenerateResponse(
-                        action="sample",
-                        codes=resp.codes,
-                        text=resp.text,
-                        batch_idx=idx,
-                        chunk_idx=chk,
-                    )
-                    
-                    # Обновляем указатели
-                    chunk_ptrs[idx] += 1
-                    if chunk_ptrs[idx] >= num_chunks[idx]:
-                        finished[idx] = True
-                    
-                    response_counter += 1
-        
-        # Сигнал завершения sample
-        for i in range(len(text)):
-            yield GenerateResponse(action="next", batch_idx=i, chunk_idx=None)
+    # 4. Пока есть хотя бы один невыданный чанк
+    while not all(finished):
+        # Собираем батч из следующих чанков (по одному от каждого текста, у кого остались)
+        batch_texts = []
+        batch_prompt_texts = []
+        batch_prompt_tokens = []
+        batch_indices = []
+        batch_chunk_indices = []
+        for i, (chunks, ptr, is_finished) in enumerate(zip(all_chunks, chunk_ptrs, finished)):
+            if not is_finished and ptr < len(chunks):
+                batch_texts.append(chunks[ptr])
+                batch_prompt_texts.append(prompt_texts[i])
+                batch_prompt_tokens.append(prompt_tokens_list[i])
+                batch_indices.append(i)
+                batch_chunk_indices.append(ptr)
+        if not batch_texts:
+            break
+        # Генерируем батчем
+        # NB: generate_batched ожидает список текстов, промптов и токенов
+        responses = batch_inference(
+            model=model,
+            device=device,
+            decode_one_token=decode_one_token,
+            text=batch_texts,
+            num_samples=num_samples,
+            max_new_tokens=max_new_tokens,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            temperature=temperature,
+            compile=compile,
+            prompt_text=batch_prompt_texts,
+            prompt_tokens=batch_prompt_tokens,
+            **kwargs,
+        )
+        # responses — генератор GenerateResponse(action, codes, text)
+        for response in responses:
+            if hasattr(response, 'action') and response.action == "sample":
+                # Добавляем batch_idx и chunk_idx для downstream
+                idx = batch_indices.pop(0)
+                chunk_idx = batch_chunk_indices.pop(0)
+                yield GenerateResponse(
+                    action="sample",
+                    codes=response.codes,
+                    text=response.text,
+                    batch_idx=idx,
+                    chunk_idx=chunk_idx,
+                )
+                chunk_ptrs[idx] += 1
+                if chunk_ptrs[idx] >= num_chunks[idx]:
+                    finished[idx] = True
+            elif hasattr(response, 'action') and response.action == "next":
+                continue
+    # После завершения всех — можно выдать action="next" для каждого текста
+    for idx in range(len(text)):
+        yield GenerateResponse(action="next", batch_idx=idx, chunk_idx=None)
 
 
 if __name__ == "__main__":
