@@ -1003,6 +1003,9 @@ def generate_long(
             cat_encoded = torch.cat(partial_encoded, dim=1)
             prompt_length = cat_encoded.size(1)
 
+            logger.info(f"[SINGLE] cat_encoded shape: {list(cat_encoded.shape)}")
+            logger.info(f"[SINGLE] prompt_length: {prompt_length}")
+            
             t0 = time.perf_counter()
             y = generate(
                 model=model,
@@ -1137,19 +1140,53 @@ def batch_inference(
     for encoded in encodeds:
         original_text_lengths.append(encoded.shape[1])  # длина текста без padding
     
-    encoded, encoded_mask = collate(
-        encodeds, end_of_text=tokenizer.get_token_id("<|end_of_text|>")
-    )
-    encoded_prompts, encoded_prompts_mask = collate(
-        encoded_prompts_, end_of_text=tokenizer.get_token_id("<|end_of_text|>")
-    )
     segs, segs_mask = collate(
         segs, end_of_text=tokenizer.get_token_id("<|end_of_text|>"), pad_right=False
     )
-    logger.info(
-        f"Encoded text batch of shape {list(encoded.shape)}, and prompt batch {list(encoded_prompts.shape)}, mask {segs_mask.shape}"
-    )
-    # CHANGED: переменные encoded* далее не используются – просто убираем
+    
+    FIXED_LENGTH = 700
+    current_length = segs.shape[2]
+
+    if current_length < FIXED_LENGTH:
+        padding_needed = FIXED_LENGTH - current_length
+        
+        # Создаем padding тензор с правильными значениями для каждого кодбука
+        segs_padding = torch.full(
+            (segs.shape[0], segs.shape[1], padding_needed),
+            0,  # Заполняем нулями сначала
+            device=segs.device,
+            dtype=segs.dtype
+        )
+        
+        # Кодбук 0 (текст): end_of_text token
+        segs_padding[:, 0, :] = tokenizer.get_token_id("<|end_of_text|>")
+        
+        # Кодбуки 1-N: CODEBOOK_PAD_TOKEN_ID (обычно 8192)
+        segs_padding[:, 1:, :] = CODEBOOK_PAD_TOKEN_ID
+        
+        # Объединяем padding слева с исходными данными
+        segs = torch.cat([segs_padding, segs], dim=2)
+        
+        # Дополняем маску слева значениями True (padding токены)
+        mask_padding = torch.full(
+            (segs_mask.shape[0], padding_needed),
+            True,  # True означает padding токен
+            device=segs_mask.device,
+            dtype=segs_mask.dtype
+        )
+        segs_mask = torch.cat([mask_padding, segs_mask], dim=1)
+
+    elif current_length > FIXED_LENGTH:
+        # Обрезаем если больше 1024 (опционально)
+        segs = segs[:, :, -FIXED_LENGTH:]
+        segs_mask = segs_mask[:, -FIXED_LENGTH:]
+
+    # Проверочное логирование
+    logger.info(f"Fixed segs shape: {list(segs.shape)}, mask shape: {segs_mask.shape}")
+    logger.info(f"Mask True count per text after padding: {segs_mask.sum(dim=1)}")
+
+    segs_mask = segs_mask.to(device=device)
+    
     
     # Move temperature, top_p, repetition_penalty to device
     # This is important so that changing params doesn't trigger recompile
@@ -1166,19 +1203,12 @@ def batch_inference(
         logger.info(f"Generating batch of {len(text)} sentences, sample "
                     f"{sample_idx + 1}/{num_samples}")
 
-        # seg = encoded[seg_idx]
-        cat_encoded = segs
-        # add prompt
-        # if use_prompt:
-        #     partial_encoded = encoded_prompts + partial_encoded
-
-        # cat_encoded = torch.cat(partial_encoded, dim=2)
-        prompt_length = cat_encoded.size(2)
+        prompt_length = segs.size(2)
 
         t0 = time.perf_counter()
         y = generate_batched(
             model=model,
-            prompt=cat_encoded,
+            prompt=segs,
             prompt_mask=segs_mask,
             max_new_tokens=max_new_tokens,
             decode_one_token=decode_one_token,  # decode_one_token_ar

@@ -130,8 +130,7 @@ for idx, (t, pt, ptok) in enumerate(zip(text, prompt_text, prompt_tokens_)):
     all_codes = []
     for response in responses:
         if hasattr(response, 'action') and response.action == "sample":
-            if hasattr(response, 'codes') and response.codes is not None:
-                logger.info(f"[SINGLE] Encoded codes shape: {response.codes.shape}")
+        
             all_codes.append(response.codes)
             logger.info(f"[SINGLE] Generating chunk: idx={idx}, text_len={len(response.text) if response.text else 0}")
         elif hasattr(response, "action") and response.action == "next":

@@ -696,7 +696,7 @@ class DualARTransformer(BaseTransformer):
         input_pos: Optional[Tensor] = None,
         vq_masks: Optional[Tensor] = None,
         key_padding_mask: Optional[Tensor]  = None
-    ) -> TransformerForwardResult:
+    ):
         x = super().forward_generate(x, input_pos, vq_masks, key_padding_mask=key_padding_mask) # TODO: don't pass vq_masks as return_all
         x.hidden_states = self.fast_project_in(x.hidden_states)
         return x

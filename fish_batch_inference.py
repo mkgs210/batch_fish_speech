@@ -14,8 +14,13 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 
 text = [
     "Что? Он никогда не работал? Тоже мне нашёлся, лентяй! А я вот всегда работаю просто охуенно!",
-    "Нет ну ты можешь себе представить? Никогда бы о таком не подумал раньше. Эта новость меня просто шокировала!",
-    "А ты знаешь, что он теперь делает?"
+    # "Нет ну ты можешь себе представить? Никогда бы о таком не подумал раньше. Эта новость меня просто шокировала!",
+    # "А ты знаешь, что он теперь делает?",
+    "До свидания",
+    # "Алло? Слушаю",
+    # "Что вы сказали? Я вас не слышу",
+    # "А вы кто вообще такой?",
+    # "Один, два, три, четыре, пять. Я иду тебя искать! Кто не спрятался, я не виновата!",
 ]
 prompt_text = [
     "Как это не надо? Ты первый вор! Ты первый вор, гнида, паршивая! А вы все депутаты, там, нахлебники! Их... Один Столыпин придумал программу какую! А они сидят там миллионы, жируют! А этого вообще клоуна надо убрать! Вот клоуна этого! Он позорит наше вот это всё! И вообще там их всех надо, понимаешь? Вот эти, показывать старческие, вот эти вот, молодых надо!"
@@ -30,7 +35,7 @@ temperature = 0.4
 seed = 42
 checkpoint_path = Path("/home/mkgs/fish_speech/new_fish/fish/checkpoints/fish-speech-1.5")
 device = "cuda"
-compile = False
+compile = True
 half = False
 output_dir = Path("temp")
 batch_size = len(text)
@@ -44,13 +49,7 @@ vqgan_device = device
 os.makedirs(output_dir, exist_ok=True)
 precision = torch.half if half else torch.bfloat16
 
-if prompt_text is not None and len(prompt_text) != len(prompt_tokens):
-    raise ValueError(
-        f"Number of prompt text ({len(prompt_text)}) and prompt tokens ({len(prompt_tokens)}) should be the same"
-    )
-
 logger.info("Starting batch inference script...")
-
 logger.info("Loading model ...")
 t0 = time.time()
 model, decode_one_token = load_model(
@@ -66,10 +65,7 @@ if torch.cuda.is_available():
     torch.cuda.synchronize()
 logger.info(f"Time to load model: {time.time() - t0:.02f} seconds")
 
-if prompt_tokens is not None:
-    prompt_tokens_ = [torch.from_numpy(np.load(p)).to(device) for p in prompt_tokens]
-else:
-    prompt_tokens_ = None
+prompt_tokens_ = [torch.from_numpy(np.load(p)).to(device) for p in prompt_tokens]
 
 torch.manual_seed(seed)
 if torch.cuda.is_available():
@@ -83,7 +79,7 @@ if compile:
         model=model,
         device=device,
         decode_one_token=decode_one_token,
-        text=["Это текст для cold start, который будет использоваться для компиляции модели."]*len(text),
+        text=["Привет!"]*len(text),
         num_samples=num_samples,
         max_new_tokens=max_new_tokens,
         top_p=top_p,
