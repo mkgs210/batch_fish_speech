@@ -256,9 +256,10 @@ def decode_one_token_ar(
     semantic_ids: list,
     previous_tokens: torch.Tensor = None,
     batched=False,
+    key_padding_mask=None,
     **sampling_kwargs,
 ) -> torch.Tensor:
-    x = model.forward_generate(x, input_pos)
+    x = model.forward_generate(x, input_pos, key_padding_mask=key_padding_mask)
 
     sampling_kwargs_main = sampling_kwargs.copy()
     # sampling_kwargs_main["temperature"] = 0.1
@@ -564,6 +565,7 @@ def generate_batched(
     prompt: torch.Tensor,
     max_new_tokens: int,
     decode_one_token=decode_one_token_naive, # снаружи придёт уже нужная версия
+    prompt_mask=None,
     **sampling_kwargs,
 ) -> torch.Tensor:
     """
@@ -601,7 +603,7 @@ def generate_batched(
     # т.к. наивный трансформер пока не умеет батч.
     if isinstance(model, DualARTransformer):
         prefill_decode = decode_one_token          # уже decode_one_token_ar
-        prefill_extra  = {"batched": True}
+        prefill_extra  = {"batched": True, "key_padding_mask": prompt_mask}
     else:
         raise RuntimeError(
             "generate_batched currently supports only DualARTransformer"
@@ -620,7 +622,7 @@ def generate_batched(
     seq[:, :, T : T + 1] = next_token
 
     input_pos = torch.tensor([T], device=device, dtype=torch.int)
-    x = decode_n_tokens_batched_unified(
+    x = decode_n_tokens_batched(
         model,
         next_token.view(bs, codebook_dim, -1),
         input_pos,
@@ -635,60 +637,6 @@ def generate_batched(
 
     return seq
 
-def decode_n_tokens_batched_unified(
-    model: NaiveTransformer,
-    cur_token: torch.Tensor,
-    input_pos: torch.Tensor,
-    num_new_tokens: int,
-    semantic_ids: list,
-    decode_one_token=decode_one_token_naive,
-    **sampling_kwargs,
-):
-    batch_size = cur_token.size(0)
-    im_end_id = model.tokenizer.get_token_id(IM_END_TOKEN)
-    
-    # Создаем тензор фиксированного размера как в single версии
-    previous_tokens = torch.zeros(
-        (batch_size, model.config.num_codebooks + 1, model.config.max_seq_len),
-        dtype=torch.int,
-        device=cur_token.device,
-    )
-
-    # ЕДИНЫЙ ЦИКЛ без проверок finished - обрезаем по end_token после
-    for i in tqdm(range(num_new_tokens)):
-        win_size = 16
-        if i < win_size:
-            window = previous_tokens[:, :, :win_size]
-        else:
-            window = previous_tokens[:, :, i - win_size : i]
-
-        with (
-            torch.backends.cuda.sdp_kernel(
-                enable_flash=False, enable_mem_efficient=False, enable_math=True
-            )
-            if torch.cuda.is_available()
-            else nullcontext()
-        ):
-            if torch.cuda.is_available() and torch.compiler.is_compiling():
-                cudagraph_mark_step_begin()
-                
-            next_token = decode_one_token(
-                model=model,
-                x=cur_token,
-                input_pos=input_pos,
-                previous_tokens=window,
-                semantic_ids=semantic_ids,
-                batched=True,
-                **sampling_kwargs,
-            ).clone()
-
-        input_pos += 1
-        cur_token = next_token.view(batch_size, model.config.num_codebooks + 1, -1)
-        previous_tokens[:, :, i : i + 1] = next_token.view(
-            batch_size, model.config.num_codebooks + 1, -1
-        )
-
-    return previous_tokens[:, :, :num_new_tokens]
 
 def decode_n_tokens_agent(
     model: NaiveTransformer,
@@ -1104,8 +1052,7 @@ def generate_long(
         # This indicates the end of the current sample
         yield GenerateResponse(action="next")
 
-@torch.no_grad()
-@torch.inference_mode()
+
 def batch_inference(
     *,
     model,
@@ -1190,27 +1137,27 @@ def batch_inference(
     for encoded in encodeds:
         original_text_lengths.append(encoded.shape[1])  # длина текста без padding
     
-    encoded, _ = collate(
-        encodeds, 
-        end_of_text=tokenizer.get_token_id("<|end_of_text|>"),
-        pad_right=True  # Паддинг справа, без маски
+    encoded, encoded_mask = collate(
+        encodeds, end_of_text=tokenizer.get_token_id("<|end_of_text|>")
     )
-
-    encoded_prompts, _ = collate(
-        encoded_prompts_, 
-        end_of_text=tokenizer.get_token_id("<|end_of_text|>"),
-        pad_right=True
+    encoded_prompts, encoded_prompts_mask = collate(
+        encoded_prompts_, end_of_text=tokenizer.get_token_id("<|end_of_text|>")
     )
-
-    segs, _ = collate(
-        segs, 
-        end_of_text=tokenizer.get_token_id("<|end_of_text|>"), 
-        pad_right=True  # УБРАЛИ pad_right=False
+    segs, segs_mask = collate(
+        segs, end_of_text=tokenizer.get_token_id("<|end_of_text|>"), pad_right=False
     )
-
-    logger.info(f"Encoded text batch of shape {list(encoded.shape)}, and prompt batch {list(encoded_prompts.shape)}")
+    logger.info(
+        f"Encoded text batch of shape {list(encoded.shape)}, and prompt batch {list(encoded_prompts.shape)}, mask {segs_mask.shape}"
+    )
     # CHANGED: переменные encoded* далее не используются – просто убираем
-
+    
+    # Move temperature, top_p, repetition_penalty to device
+    # This is important so that changing params doesn't trigger recompile
+    temperature = torch.tensor(temperature, device=device, dtype=torch.float)
+    top_p = torch.tensor(top_p, device=device, dtype=torch.float)
+    repetition_penalty = torch.tensor(
+        repetition_penalty, device=device, dtype=torch.float
+    )
 
     # We rely on compiled decode_one_token only (same as single inference); leave generate_batched in eager mode to keep tqdm working.
     for sample_idx in range(num_samples):
@@ -1219,15 +1166,22 @@ def batch_inference(
         logger.info(f"Generating batch of {len(text)} sentences, sample "
                     f"{sample_idx + 1}/{num_samples}")
 
+        # seg = encoded[seg_idx]
+        cat_encoded = segs
+        # add prompt
+        # if use_prompt:
+        #     partial_encoded = encoded_prompts + partial_encoded
 
-        prompt_length = segs.size(2)
+        # cat_encoded = torch.cat(partial_encoded, dim=2)
+        prompt_length = cat_encoded.size(2)
 
         t0 = time.perf_counter()
         y = generate_batched(
             model=model,
-            prompt=segs,
+            prompt=cat_encoded,
+            prompt_mask=segs_mask,
             max_new_tokens=max_new_tokens,
-            decode_one_token=decode_one_token,
+            decode_one_token=decode_one_token,  # decode_one_token_ar
             temperature=temperature,
             top_p=top_p,
             repetition_penalty=repetition_penalty,
