@@ -34,6 +34,7 @@ compile = True
 half = False
 output_dir = Path("temp")
 batch_size = len(text)
+iterative_prompt = True
 
 # Параметры для vqgan
 vqgan_config = "firefly_gan_vq"
@@ -90,14 +91,12 @@ if compile:
         temperature=temperature,
         compile=compile,
         chunk_length=chunk_length,
-        iterative_prompt=True,
+        iterative_prompt=iterative_prompt,
         prompt_text=prompt_text, #[""]*len(text),
         prompt_tokens=prompt_tokens_, #[None]*len(text),
     ))
     logger.info(f"Cold start complete. Model is ready for fast batch inference. Compile time: {time.time() - t_compile:.2f} seconds")
 
-chunk_length = 100  # Можно сделать параметром, сейчас дефолт
-iterative_prompt = True  # Можно сделать параметром, сейчас дефолт
 start_time = time.time()
 
 responses = batch_generate_long(

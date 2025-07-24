@@ -1104,7 +1104,8 @@ def generate_long(
         # This indicates the end of the current sample
         yield GenerateResponse(action="next")
 
-
+@torch.no_grad()
+@torch.inference_mode()
 def batch_inference(
     *,
     model,
@@ -1209,14 +1210,7 @@ def batch_inference(
 
     logger.info(f"Encoded text batch of shape {list(encoded.shape)}, and prompt batch {list(encoded_prompts.shape)}")
     # CHANGED: переменные encoded* далее не используются – просто убираем
-    
-    # Move temperature, top_p, repetition_penalty to device
-    # This is important so that changing params doesn't trigger recompile
-    temperature = torch.tensor(temperature, device=device, dtype=torch.float)
-    top_p = torch.tensor(top_p, device=device, dtype=torch.float)
-    repetition_penalty = torch.tensor(
-        repetition_penalty, device=device, dtype=torch.float
-    )
+
 
     # We rely on compiled decode_one_token only (same as single inference); leave generate_batched in eager mode to keep tqdm working.
     for sample_idx in range(num_samples):
