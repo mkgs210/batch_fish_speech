@@ -91,8 +91,8 @@ if compile:
         compile=compile,
         chunk_length=chunk_length,
         iterative_prompt=True,
-        prompt_text=[""]*len(text),
-        prompt_tokens=[None]*len(text),
+        prompt_text=prompt_text, #[""]*len(text),
+        prompt_tokens=prompt_tokens_, #[None]*len(text),
     ))
     logger.info(f"Cold start complete. Model is ready for fast batch inference. Compile time: {time.time() - t_compile:.2f} seconds")
 
