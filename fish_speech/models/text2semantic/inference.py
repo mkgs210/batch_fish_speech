@@ -58,9 +58,9 @@ def multinomial_sample_one_no_sync(
 def logits_to_probs(
     logits,
     previous_tokens: Optional[torch.Tensor] = None,
-    temperature: torch.Tensor = 1.0,
-    top_p: torch.Tensor = 1.0,
-    repetition_penalty: torch.Tensor = 1.0,
+    temperature= 1.0,
+    top_p= 1.0,
+    repetition_penalty= 1.0,
 ) -> torch.Tensor:
     # Apply repetition penalty
     if previous_tokens is not None:
@@ -97,9 +97,9 @@ def multinomial_sample_one_no_sync_agent(
 def logits_to_probs_agent(
     logits,
     previous_tokens: Optional[torch.Tensor] = None,
-    temperature: torch.Tensor = 1.0,
-    top_p: torch.Tensor = 1.0,
-    repetition_penalty: torch.Tensor = 1.0,
+    temperature= 1.0,
+    top_p= 1.0,
+    repetition_penalty= 1.0,
 ) -> torch.Tensor:
     # Apply repetition penalty
     if previous_tokens is not None:
@@ -155,7 +155,7 @@ def decode_one_token_ar_agent(
     x: torch.Tensor,
     input_pos: torch.Tensor,
     semantic_ids: list,
-    previous_tokens: torch.Tensor = None,
+    previous_tokens= None,
     **sampling_kwargs,
 ) -> torch.Tensor:
     # print(x, input_pos)
@@ -214,7 +214,7 @@ def decode_one_token_naive_agent(
     x: torch.Tensor,
     input_pos: torch.Tensor,
     semantic_ids: list,
-    previous_tokens: torch.Tensor = None,
+    previous_tokens= None,
     **sampling_kwargs,
 ) -> torch.Tensor:
     x = model.forward_generate(x, input_pos)
@@ -254,7 +254,7 @@ def decode_one_token_ar(
     x: torch.Tensor,
     input_pos: torch.Tensor,
     semantic_ids: list,
-    previous_tokens: torch.Tensor = None,
+    previous_tokens= None,
     batched=False,
     key_padding_mask=None,
     **sampling_kwargs,
@@ -321,7 +321,7 @@ def decode_one_token_naive(
     model: NaiveTransformer,
     x: torch.Tensor,
     input_pos: torch.Tensor,
-    previous_tokens: torch.Tensor = None,
+    previous_tokens= None,
     **sampling_kwargs,
 ) -> torch.Tensor:
     x = model.forward_generate(x, input_pos)
@@ -575,7 +575,6 @@ def generate_batched(
     # create an empty tensor of the expected final shape and fill in the current tokens
     bs, C, T = prompt.shape
     device, dtype = prompt.device, prompt.dtype
-    # semantic_id = model.tokenizer.convert_tokens_to_ids("<|semantic|>")
     semantic_ids = [
         model.tokenizer.get_token_id(f"<|semantic:{i}|>") for i in range(1024)
     ]
@@ -598,20 +597,10 @@ def generate_batched(
     seq[:, :, :T] = prompt
     input_pos = torch.arange(0, T, device=device)
 
-    # ---------- NEW ----------
-    # в Dual‑AR мы всегда вызываем ar‑вариант; в остальных – бросаем ошибку,
-    # т.к. наивный трансформер пока не умеет батч.
-    if isinstance(model, DualARTransformer):
-        prefill_decode = decode_one_token          # уже decode_one_token_ar
-        prefill_extra  = {"batched": True, "key_padding_mask": prompt_mask}
-    else:
-        raise RuntimeError(
-            "generate_batched currently supports only DualARTransformer"
-        )
-    # ---------- /NEW ----------
+    prefill_extra  = {"batched": True, "key_padding_mask": prompt_mask}
     if torch.cuda.is_available() and torch.compiler.is_compiling():
         cudagraph_mark_step_begin()
-    next_token = prefill_decode(
+    next_token = decode_one_token(
         model,
         prompt.view(bs, codebook_dim, -1),
         input_pos,
@@ -631,7 +620,6 @@ def generate_batched(
         semantic_ids=semantic_ids,
         **sampling_kwargs,
     )
-    # x = torch.cat(generated_tokens, dim=1)
     seq = seq[:, :, : T + 1 + x.size(2)]
     seq[:, :, T + 1 :] = x.view(bs, model.config.num_codebooks + 1, -1)
 
@@ -862,7 +850,7 @@ def load_model(checkpoint_path, device, precision, compile=False, is_agent=False
             fullgraph=True,
             dynamic=False,
             backend="inductor" if torch.cuda.is_available() else "aot_eager",
-            mode="reduce-overhead" if torch.cuda.is_available() else None,
+            mode="max-autotune" if torch.cuda.is_available() else None,
         )
 
     return model.eval(), decode_one_token
@@ -885,7 +873,7 @@ def generate_long(
     text: str,
     num_samples: int = 1,
     max_new_tokens: int = 0,
-    top_p: int = 0.7,
+    top_p: float = 0.7,
     repetition_penalty: float = 1.5,
     temperature: float = 0.7,
     compile: bool = False,
@@ -1018,7 +1006,7 @@ def generate_long(
             )
 
             if sample_idx == 0 and seg_idx == 0 and compile:
-                logger.info(f"Compilation time: {time.perf_counter() - t0:.2f} seconds")
+                logger.info(f"generate time: {time.perf_counter() - t0:.2f} seconds")
 
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -1064,7 +1052,7 @@ def batch_inference(
     text: str | list[str],
     num_samples: int = 1,
     max_new_tokens: int = 0,
-    top_p: int = 0.7,
+    top_p: float = 0.7,
     repetition_penalty: float = 1.5,
     temperature: float = 0.7,
     compile: bool = False,
@@ -1176,11 +1164,6 @@ def batch_inference(
         )
         segs_mask = torch.cat([mask_padding, segs_mask], dim=1)
 
-    elif current_length > FIXED_LENGTH:
-        # Обрезаем если больше 1024 (опционально)
-        segs = segs[:, :, -FIXED_LENGTH:]
-        segs_mask = segs_mask[:, -FIXED_LENGTH:]
-
     # Проверочное логирование
     logger.info(f"Fixed segs shape: {list(segs.shape)}, mask shape: {segs_mask.shape}")
     logger.info(f"Mask True count per text after padding: {segs_mask.sum(dim=1)}")
@@ -1218,7 +1201,7 @@ def batch_inference(
         )
 
         if sample_idx == 0 and compile:
-            logger.info(f"Compilation time: {time.perf_counter() - t0:.2f} seconds")
+            logger.info(f"generate_batched time: {time.perf_counter() - t0:.2f} seconds")
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -1509,6 +1492,7 @@ def batch_generate_long(
     iterative_prompt: bool = True,
     prompt_text: Optional[list[str]] = None,
     prompt_tokens: Optional[list[torch.Tensor]] = None,
+    target_batch_size: int = 8,
     **kwargs,
 ):
     """
@@ -1563,7 +1547,6 @@ def batch_generate_long(
                 break  # Все чанки обработаны
             
             # ИСПРАВЛЕНИЕ: Дополняем батч до фиксированного размера
-            target_batch_size = len(text)  # Оригинальный размер
             while len(batch_texts) < target_batch_size:
                 # Дублируем последний элемент
                 batch_texts.append(batch_texts[-1])

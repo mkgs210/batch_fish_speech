@@ -14,13 +14,13 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 
 text = [
     "Что? Он никогда не работал? Тоже мне нашёлся, лентяй! А я вот всегда работаю просто охуенно!",
-    # "Нет ну ты можешь себе представить? Никогда бы о таком не подумал раньше. Эта новость меня просто шокировала!",
-    # "А ты знаешь, что он теперь делает?",
+    "А ты знаешь, что он теперь делает?",
     "До свидания",
-    # "Алло? Слушаю",
-    # "Что вы сказали? Я вас не слышу",
-    # "А вы кто вообще такой?",
-    # "Один, два, три, четыре, пять. Я иду тебя искать! Кто не спрятался, я не виновата!",
+    "Алло? Слушаю",
+    "Что вы сказали? Я вас не слышу",
+    "А вы кто вообще такой?",
+    "Нет ну ты можешь себе представить? Никогда бы о таком не подумал раньше. Эта новость меня просто шокировала!",
+    "Один, два, три, четыре, пять. Я иду тебя искать! Кто не спрятался, я не виновата!",
 ]
 prompt_text = [
     "Как это не надо? Ты первый вор! Ты первый вор, гнида, паршивая! А вы все депутаты, там, нахлебники! Их... Один Столыпин придумал программу какую! А они сидят там миллионы, жируют! А этого вообще клоуна надо убрать! Вот клоуна этого! Он позорит наше вот это всё! И вообще там их всех надо, понимаешь? Вот эти, показывать старческие, вот эти вот, молодых надо!"
@@ -90,6 +90,7 @@ if compile:
         iterative_prompt=iterative_prompt,
         prompt_text=prompt_text, #[""]*len(text),
         prompt_tokens=prompt_tokens_, #[None]*len(text),
+        target_batch_size=len(text),
     ))
     logger.info(f"Cold start complete. Model is ready for fast batch inference. Compile time: {time.time() - t_compile:.2f} seconds")
 
@@ -110,6 +111,7 @@ responses = batch_generate_long(
     prompt_tokens=prompt_tokens_,
     chunk_length=chunk_length,
     iterative_prompt=iterative_prompt,
+    target_batch_size=len(text),
 )
 
 # Функция для декодирования кодов в аудио через vqgan
@@ -137,7 +139,7 @@ logger.info(f"Loaded VQGAN model in {time.time() - t_vqgan:.2f} seconds")
 
 for response in responses:
     t_ch = time.time()
-    if hasattr(response, 'action') and response.action == "sample":
+    if hasattr(response, 'action') and response.action == "sample" and response.chunk_idx != -1:
         wav_path = os.path.join(output_dir, f"gen_{response.batch_idx}_{response.chunk_idx}.wav")
         logger.info(f"[BATCH] Generating chunk: batch_idx={getattr(response, 'batch_idx', None)}, chunk_idx={getattr(response, 'chunk_idx', None)}, text_len={len(response.text) if response.text else 0}")
         codes_to_wav([response.codes], wav_path, vqgan_model)
