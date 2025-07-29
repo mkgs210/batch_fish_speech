@@ -117,13 +117,17 @@ responses = batch_generate_long(
 # Функция для декодирования кодов в аудио через vqgan
 
 def codes_to_wav(codes, output_path, vqgan_model):
-    import torch
-    import numpy as np
-    import soundfile as sf
     device = next(vqgan_model.parameters()).device
-    codes = torch.cat(codes, dim=1).long().to(device)  # [num_codebooks, T]
+    codes = torch.cat(codes, dim=1).long().to(device) # [num_codebooks, T]
+    
+    # ПРОВЕРКА НА ПУСТЫЕ КОДЫ
+    if codes.shape[-1] == 0:
+        logger.warning(f"Empty codes passed to codes_to_wav, skipping {output_path}")
+        return
+        
     if codes.ndim == 3:
-        codes = codes[0]  # [num_codebooks, T]
+        codes = codes[0] # [num_codebooks, T]
+    
     feature_lengths = torch.tensor([codes.shape[1]], device=device)
     t0 = time.time()
     fake_audios, _ = vqgan_model.decode(indices=codes[None], feature_lengths=feature_lengths)

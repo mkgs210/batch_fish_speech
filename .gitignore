@@ -32,3 +32,4 @@ asr-label*
 /.gradio
 *log
 /temp
+/torch_compile_debug
