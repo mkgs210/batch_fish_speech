@@ -212,11 +212,14 @@ def decode_one_token_ar(
     x: torch.Tensor,
     input_pos: torch.Tensor,
     semantic_ids: list,
-    previous_tokens: torch.Tensor = None,
+    previous_tokens: torch.Tensor | None = None,
+    key_padding_mask: torch.Tensor | None = None,
     **sampling_kwargs,
 ) -> torch.Tensor:
-    # ПРАВИЛЬНО: используем forward_generate для получения логитов
-    result = model.forward_generate(x, input_pos, key_padding_mask=None)
+    # Теперь можем подавать маску, если она есть
+    result = model.forward_generate(
+        x, input_pos, key_padding_mask=key_padding_mask
+    )
     
     sampling_kwargs_main = sampling_kwargs.copy()
     
@@ -363,6 +366,7 @@ def decode_n_tokens_batched(
     input_pos: torch.Tensor,
     num_new_tokens: int,
     semantic_ids: list,
+    key_padding_mask: torch.Tensor | None = None,   # NEW
     decode_one_token=decode_one_token_ar,
     **sampling_kwargs,
 ):
@@ -549,17 +553,14 @@ def generate_batched(
     
     input_pos = torch.arange(0, T, device=device)
     
-    # ДОБАВЛЯЕМ ТАЙМЕР ВОКРУГ PREFILL ФАЗЫ
-    import time
+    # --- PREFILL ---
     prefill_start_time = time.time()
-    
-    # --- Prefill выполняем без compile, чтобы не порождать второй граф ---
-    prefill_decode = decode_one_token_ar    # всегда eager
-    next_token = prefill_decode(
+    next_token = decode_one_token_ar(        # EAGER ⇒ без доп. графа
         model,
         prompt.view(bs, codebook_dim, -1),
         input_pos,
         semantic_ids=semantic_ids,
+        key_padding_mask=prompt_mask,        # ← маска работает!
         **sampling_kwargs,
     ).clone()
     
