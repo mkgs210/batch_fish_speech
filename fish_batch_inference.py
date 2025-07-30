@@ -1,4 +1,4 @@
-from fish_speech.models.text2semantic.inference import batch_inference, load_model
+from fish_speech.models.text2semantic.inference import batch_generate_long, load_model
 from fish_speech.models.vqgan.inference import load_model as load_vqgan_model
 import torch
 import numpy as np
@@ -7,23 +7,16 @@ import time
 from loguru import logger
 from pathlib import Path
 import soundfile as sf
-from fish_speech.models.text2semantic.inference import batch_generate_long
 
 import warnings
 warnings.filterwarnings('ignore', category=FutureWarning)
 
 text = [
-    "Что? Он никогда не работал? Тоже мне нашёлся, лентяй! А я вот всегда работаю просто охуенно!",
-    "А ты знаешь, что он теперь делает?",
-    "До свидания",
-    "Алло? Слушаю",
-    "Что вы сказали? Я вас не слышу",
-    "А вы кто вообще такой?",
-    "Нет ну ты можешь себе представить? Никогда бы о таком не подумал раньше. Эта новость меня просто шокировала!",
-    "Один, два, три, четыре, пять. Я иду тебя искать! Кто не спрятался, я не виновата!",
+    "Text 1",
+    "Text 2",
 ]
 prompt_text = [
-    "Как это не надо? Ты первый вор! Ты первый вор, гнида, паршивая! А вы все депутаты, там, нахлебники! Их... Один Столыпин придумал программу какую! А они сидят там миллионы, жируют! А этого вообще клоуна надо убрать! Вот клоуна этого! Он позорит наше вот это всё! И вообще там их всех надо, понимаешь? Вот эти, показывать старческие, вот эти вот, молодых надо!"
+    "Your prompt text"
 ] * len(text)
 prompt_tokens = [Path("fake.npy")] * len(text)
 num_samples = 1
