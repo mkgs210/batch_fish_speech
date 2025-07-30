@@ -17,7 +17,7 @@
     ```bash
     python fish_speech/models/dac/inference.py \
         -i "ref_audio_name.wav" \
-        --checkpoint-path "checkpoints/openaudio-s1-mini/codec.pth"
+        --checkpoint-path "checkpoints/fish-speech-1.5"
     ```
 
     Эта команда создаст `fake.npy` (можно указать путь сохранения).
