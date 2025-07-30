@@ -17,7 +17,7 @@ A **Fish Speech fork** with enhanced batch inference for efficient speech genera
     ```bash
     python fish_speech/models/dac/inference.py \
         -i "ref_audio_name.wav" \
-        --checkpoint-path "checkpoints/openaudio-s1-mini/codec.pth"
+        --checkpoint-path "checkpoints/fish-speech-1.5/"
     ```
 
     This command will generate `fake.npy` (specify the output path if needed).
