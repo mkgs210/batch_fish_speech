@@ -1,4 +1,4 @@
-[English](../README.md) | [Russian](docs/README.ru.md) | **简体中文** | [Portuguese](README.pt-BR.md) | [日本語](README.ja.md) | [한국어](README.ko.md)<br>
+[English](../README.md) | [Russian](README.ru.md) | **简体中文** | [Portuguese](README.pt-BR.md) | [日本語](README.ja.md) | [한국어](README.ko.md)<br>
 
 # Fish Speech 批量推理
 
