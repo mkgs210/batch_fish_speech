@@ -1,4 +1,4 @@
-[English](../README.md) | **Russian** | [简体中文](docs/README.zh.md) | [Portuguese](docs/README.pt-BR.md) | [日本語](docs/README.ja.md) | [한국어](docs/README.ko.md) 
+[English](../README.md) | **Russian** | [简体中文](README.zh.md) | [Portuguese](README.pt-BR.md) | [日本語](README.ja.md) | [한국어](README.ko.md) 
 
 # Батч-инференс в Fish Speech
 
