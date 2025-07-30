@@ -1,4 +1,4 @@
-[English](../README.md) | [Russian](docs/README.ru.md) | [简体中文](README.zh.md) | **Portuguese** | [日本語](README.ja.md) | [한국어](README.ko.md)<br>
+[English](../README.md) | [Russian](README.ru.md) | [简体中文](README.zh.md) | **Portuguese** | [日本語](README.ja.md) | [한국어](README.ko.md)<br>
 
 # Fish Speech Batch Inference
 
