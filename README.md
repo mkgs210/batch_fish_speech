@@ -4,6 +4,9 @@
 
 A **Fish Speech fork** with enhanced batch inference for efficient speech generation.
 
+Batch inference allows you generate multiple audio at once instead of one by one. This makes the process much faster and saves time. To use batch inference, set up your reference audio file and texts, and configure generation settings as shown in the usage section below.
+
+
 ## 🚀 Features
 
 - **Batch Processing**: Handles multiple texts at once for faster inference
